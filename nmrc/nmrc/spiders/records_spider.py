@@ -1,16 +1,17 @@
 import scrapy
-from scrapy.utils.response import open_in_browser
 from ..secrets import USER, PASSWORD
 
 
 class RecordsSpider(scrapy.Spider):
+    """
+    Spider for crawling and extracting the tabular patient records available via the systmonline tpp site,
+    as used by the NHS in the UK.
+    """
     name = 'medical_records'
     start_url = 'https://systmonline.tpp-uk.com/2/Login'
     start_urls=[start_url]
-    patient_url = 'https://systmonline.tpp-uk.com/2/PatientRecord'
     start_date = '28/03/2003'
     end_date = '28/03/2018'
-    endDate = ''
 
     def parse(self, response):
         self.logger.info("Starting scrape after initial response at %s", response.url)
@@ -26,47 +27,67 @@ class RecordsSpider(scrapy.Spider):
         return [next_req]
 
     def logged_in(self, response: scrapy.http.Response) -> scrapy.Request:
-        self.logger.info("Continuing scrape with %s", self.patient_url)
+        self.logger.info("Continuing scrape post-login")
         self.logger.debug("Headers: %s", response.headers)
 
-        uuid = response.xpath("//form/input[@name='UUID']/@value").extract_first()
-        self.logger.debug("Found UUID: %s", uuid)
-        if not uuid:
-            open_in_browser(response)
-
+        # Extra form data to get the full range of patient data;
+        #  probably not necessary for this initial request.
         form_data = {
-                      #'UUID': uuid,
                      'DateFrom': self.start_date,
                      'DateTo': self.end_date,
                      'IncludeUnknownDates': 'on',
-                     'Page1': 'Page1'
                     }
 
         next_req = scrapy.FormRequest.from_response(
                 response=response,
-                #url=self.patient_url,
                 formcss='form[action="PatientRecord"]',
                 formdata=form_data,
                 callback=self.fan_out,
                 )
 
-        self.logger.debug("Next req will have URL: %s, Cookies: %s", next_req.url, next_req.cookies)
+        self.logger.debug("Next req will have URL: %s", next_req.url)
 
         return next_req
 
     def fan_out(self, response: scrapy.http.Response) -> scrapy.Request:
+        """
+        Scrape each of the patient record detail pages present in the response. Yields a new request per detail page.
+        :param response: Response for the patient record detail page
+        """
         self.logger.info("Fanning out requests from %s", response.url)
 
-        open_in_browser(response)
+        # The number of pages is not returned in any useful format so we have to extract it by finding the
+        # penultimate page link (the last one is "next")
+        last_page = response.xpath("//form[@name='FormRecordFilters']/p/a[last()-1]/text()").extract_first()
+        self.logger.debug("Last page number is %s", last_page)
+        last_page = int(last_page)
+        
+        for i in range(1, last_page):
+            # To get page X from the Record filter we need to send a PageX=PageX key in its POST data.
+            page = f'Page{i}'
+            form_data = {
+                         'DateFrom': self.start_date,
+                         'DateTo': self.end_date,
+                         'IncludeUnknownDates': 'on',
+                         page: page,
+                        }
+            self.logger.debug("Form data: %s", form_data)
 
-        for url in response.css("p > a[onclick]"):
-            yield scrapy.FormRequest.from_response(response, formnumber=0, callback=self.dump)
+            next_req = scrapy.FormRequest.from_response(
+                    response=response,
+                    formcss='form[action="PatientRecord"]',
+                    formdata=form_data,
+                    callback=self.dump,
+                    meta={"page": i},
+                    )
+            yield next_req
 
     def dump(self, response: scrapy.http.Response):
-        self.logger.info("Parsing %s", response.url)
+        page_num = response.meta.get("page")
+        self.logger.info("Dumping data from %s, page number: %s", response.url, page_num)
 
-        # Dump response
-        with open("output.html", "ab") as f:
-            f.write(response.body)
+        out_path = f"output/patient_record_{page_num:02d}.html"
 
-
+        # Dump the table containing the actual patient records.
+        with open(out_path, "wt", encoding="UTF8") as f:
+            f.write(response.xpath("//table[@id='patientRecord']").extract_first())
