@@ -168,3 +168,9 @@ venv.bak/
 
 
 # End of https://www.gitignore.io/api/python,pycharm
+
+# Don't store ANY IDEA state
+.idea/**
+
+# Ignore secrets.py
+nmrc/nmrc/secrets.py
